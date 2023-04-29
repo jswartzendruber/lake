@@ -38,6 +38,12 @@ enum Operation {
     Sub,
     Mul,
     Div,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Eq,
+    Neq,
 }
 
 #[derive(Debug)]
@@ -70,6 +76,26 @@ struct ReturnStmt {
 struct WhileLoop {
     condition: Expr,
     body: Vec<Stmt>,
+}
+
+macro_rules! if_stmt {
+    ($condition:expr, { $( $elem:expr; )* }) => {{
+        let if_true = vec![ $( Stmt::ReturnStmt($elem), ), * ];
+        IfStmt {
+            condition: $condition,
+            if_true: if_true,
+            if_false: None,
+        }
+    }};
+	($condition:expr, { $( $elem1:expr; )* }, else { $( $elem2:expr; )* }) => {{
+        let if_true = vec![ $( Stmt::ReturnStmt($elem1), ), * ];
+		let if_false = vec![ $( Stmt::ReturnStmt($elem2), ), * ];
+        IfStmt {
+            condition: $condition,
+            if_true: if_true,
+            if_false: Some(if_false),
+        }
+    }};
 }
 
 macro_rules! return_stmt {
@@ -108,12 +134,18 @@ macro_rules! expr_value_op {
 }
 
 fn main() {
-    println!(
-        "{:#?}",
-        return_stmt!(expr!(
-            expr_value_op!(Operation::Add),
+    let prog = if_stmt!(
+        expr!(
+            expr_value_op!(Operation::Eq),
             expr_value_int!(7),
-            expr_value_int!(14)
-        ))
+            expr_value_int!(7)
+        ),
+        {
+            return_stmt!(expr!(expr_value_int!(1)));
+        }, else {
+            return_stmt!(expr!(expr_value_int!(0)));
+        }
     );
+
+    println!("{:#?}", prog);
 }
