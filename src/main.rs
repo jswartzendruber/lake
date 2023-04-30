@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::{fs::File, io::Write, process::Command};
+
 #[derive(Debug)]
 struct Program {
     funcs: Vec<FuncDecl>,
@@ -138,38 +140,30 @@ macro_rules! expr_value_op {
 type Register = u32;
 
 #[derive(Debug)]
-enum IRROp3 {
+enum IRInstr {
+    IR2(IR2),
+    IRJ(IRJ),
+}
+
+#[derive(Debug, Copy, Clone)]
+enum IROp2 {
     Add,
+    Move,
+    Return, // TODO: Return should just yeild one register, but it currently just marks different paths so leaving for now.
     Compare,
 }
 
 #[derive(Debug)]
-enum IRInstr {
-    IRR3(IRR3),
-    IRI2(IRI2),
-    IRJ2(IRJ2),
-    IRJ(IRJ),
+enum IR2Source {
+    Reg(Register),
+    Imm(i64),
 }
 
 #[derive(Debug)]
-struct IRR3 {
-    opcode: IRROp3,
+struct IR2 {
+    opcode: IROp2,
+    source: IR2Source,
     dest: Register,
-    op1: Register,
-    op2: Register,
-}
-
-#[derive(Debug)]
-enum IRIOp2 {
-    Load,
-    Return,
-}
-
-#[derive(Debug)]
-struct IRI2 {
-    opcode: IRIOp2,
-    dest: Register,
-    immediate: i64,
 }
 
 #[derive(Debug)]
@@ -182,14 +176,6 @@ enum IRJOp {
 struct IRJ {
     opcode: IRJOp,
     skip_instrs: u32,
-}
-
-#[derive(Debug)]
-struct IRJ2 {
-    opcode: IRJOp,
-    skip_instrs: u32,
-    op1: Register,
-    op2: Register,
 }
 
 #[derive(Debug)]
@@ -216,10 +202,10 @@ impl IRGen {
 
         match &expr.value {
             ExprValue::Integer(i) => {
-                self.ir.push(IRInstr::IRI2(IRI2 {
-                    opcode: IRIOp2::Load,
+                self.ir.push(IRInstr::IR2(IR2 {
+                    opcode: IROp2::Move,
+                    source: IR2Source::Imm(*i),
                     dest,
-                    immediate: *i,
                 }));
 
                 dest
@@ -228,18 +214,28 @@ impl IRGen {
                 let op1 = self.gen_expr(expr.left.as_ref().unwrap());
                 let op2 = self.gen_expr(expr.right.as_ref().unwrap());
 
-                let opcode = match o {
-                    Operation::Add => IRROp3::Add,
-                    Operation::Eq => IRROp3::Compare,
+                match o {
+                    Operation::Add => {
+                        self.ir.push(IRInstr::IR2(IR2 {
+                            opcode: IROp2::Add,
+                            source: IR2Source::Reg(op1),
+                            dest,
+                        }));
+                        self.ir.push(IRInstr::IR2(IR2 {
+                            opcode: IROp2::Add,
+                            source: IR2Source::Reg(op2),
+                            dest,
+                        }));
+                    }
+                    Operation::Eq => {
+                        self.ir.push(IRInstr::IR2(IR2 {
+                            opcode: IROp2::Compare,
+                            source: IR2Source::Reg(op1),
+                            dest: op2,
+                        }));
+                    }
                     _ => unimplemented!(),
                 };
-
-                self.ir.push(IRInstr::IRR3(IRR3 {
-                    opcode,
-                    dest,
-                    op1,
-                    op2,
-                }));
 
                 dest
             }
@@ -247,34 +243,12 @@ impl IRGen {
         }
     }
 
-    fn gen_stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::ReturnStmt(return_stmt) => {
-                let expr = self.gen_expr(&return_stmt.returning);
-                self.ir.push(IRInstr::IRI2(IRI2 {
-                    opcode: IRIOp2::Return,
-                    dest: expr,
-                    immediate: 69,
-                }));
-            }
-            _ => unimplemented!(),
-        }
-    }
+    fn gen_if_stmt(&mut self, if_stmt: &IfStmt) {
+        self.gen_expr(&if_stmt.condition);
 
-    fn lower(mut self, if_stmt: IfStmt) -> IRGen {
-        let condition = self.gen_expr(&if_stmt.condition);
-
-        let zero = self.new_reg();
-        self.ir.push(IRInstr::IRI2(IRI2 {
-            opcode: IRIOp2::Load,
-            dest: zero,
-            immediate: 0,
-        }));
-        self.ir.push(IRInstr::IRJ2(IRJ2 {
+        self.ir.push(IRInstr::IRJ(IRJ {
             opcode: IRJOp::JumpNotEq,
             skip_instrs: 0,
-            op1: condition,
-            op2: zero,
         }));
         let jump_if_false_loc = self.ir.len() - 1;
 
@@ -290,14 +264,14 @@ impl IRGen {
         let if_false_skip_count = self.ir.len() - jump_if_false_loc - 1;
         let jump_if_false = self.ir.get_mut(jump_if_false_loc);
         match jump_if_false.unwrap() {
-            IRInstr::IRJ2(instr) => {
+            IRInstr::IRJ(instr) => {
                 instr.skip_instrs = if_false_skip_count as u32;
             }
             _ => unreachable!(),
         }
 
-        if let Some(if_false) = if_stmt.if_false {
-            for stmt in &if_false {
+        if let Some(if_false) = &if_stmt.if_false {
+            for stmt in if_false {
                 self.gen_stmt(stmt);
             }
         }
@@ -312,12 +286,125 @@ impl IRGen {
                 _ => unreachable!(),
             }
         }
+    }
+
+    fn gen_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::ReturnStmt(return_stmt) => {
+                let expr = self.gen_expr(&return_stmt.returning);
+                self.ir.push(IRInstr::IR2(IR2 {
+                    opcode: IROp2::Return,
+                    source: IR2Source::Imm(1),
+                    dest: expr,
+                }));
+            }
+            Stmt::IfStmt(if_stmt) => self.gen_if_stmt(if_stmt),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn lower(mut self, if_stmt: IfStmt) -> IRGen {
+        self.gen_stmt(&Stmt::IfStmt(if_stmt));
 
         self
     }
 }
 
 // End IR
+
+// Compile
+
+struct Compiler {
+    instrs: Vec<String>,
+}
+
+impl Compiler {
+    fn new() -> Self {
+        Self { instrs: vec![] }
+    }
+
+    fn compile(mut self, ir: &Vec<IRInstr>) -> Self {
+        self.instrs.push(format!("\t.global _start"));
+        self.instrs.push(format!("\t.text"));
+        self.instrs.push(format!("_start:"));
+
+        for instr in ir {
+            self.emit_instr(instr);
+        }
+
+        self.instrs.push(format!("\tmov $0, %rdi")); // exit code
+        self.instrs.push(format!("\tmov $60, %rax")); // sys_exit
+        self.instrs.push(format!("\tsyscall"));
+
+        self
+    }
+
+    // Need some register allcation
+    fn emit_instr(&mut self, instr: &IRInstr) {
+        match instr {
+            IRInstr::IR2(instr) => {
+                let op = match instr.opcode {
+                    IROp2::Add => "add",
+                    IROp2::Move => "mov",
+                    IROp2::Return => "ret",
+                    IROp2::Compare => "cmp",
+                };
+
+                let src = match instr.source {
+                    IR2Source::Reg(r) => format!("%{}", r),
+                    IR2Source::Imm(i) => format!("${}", i),
+                };
+
+                let dest = format!("%{}", instr.dest);
+
+                self.instrs.push(format!("\t{} {}, {}", op, src, dest));
+            }
+            IRInstr::IRJ(instr) => {
+                println!("jump unimplemented");
+            }
+        }
+    }
+
+    fn run(&self) {
+        let mut file = File::create("out.s").unwrap();
+        for s in &self.instrs {
+            file.write_all(s.as_bytes()).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+
+        let assembler = Command::new("as")
+            .arg("out.s")
+            .arg("-o")
+            .arg("out.o")
+            .output()
+            .expect("Error assembling");
+        if assembler.status.success() {
+            print!("{}", String::from_utf8(assembler.stdout).unwrap());
+        } else {
+            print!("{}", String::from_utf8(assembler.stderr).unwrap());
+        }
+
+        let linker = Command::new("ld")
+            .arg("-m")
+            .arg("elf_x86_64")
+            .arg("out.o")
+            .arg("-o")
+            .arg("out")
+            .output()
+            .expect("Error linking");
+        if linker.status.success() {
+            print!("{}", String::from_utf8(linker.stdout).unwrap());
+        } else {
+            print!("{}", String::from_utf8(linker.stderr).unwrap());
+        }
+
+        let result = Command::new("./out").output().expect("Error running code");
+        print!("{}", String::from_utf8(result.stdout).unwrap());
+        println!("Exit code: {}", result.status.code().unwrap());
+    }
+}
+
+// End Compile
 
 fn main() {
     let prog = if_stmt!(
@@ -336,7 +423,14 @@ fn main() {
     // println!("{:#?}", prog);
 
     let ir = IRGen::new().lower(prog);
-    for instr in ir.ir {
+    for instr in &ir.ir {
         println!("{:?}", instr);
     }
+    println!();
+    let compiler = Compiler::new().compile(&ir.ir);
+    for instr in &compiler.instrs {
+        println!("{}", instr);
+    }
+    println!();
+    compiler.run();
 }
