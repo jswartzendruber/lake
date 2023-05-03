@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::{fs::File, io::Write, process::Command};
+use std::{collections::HashMap, fs::File, io::Write, process::Command};
 
 #[derive(Debug)]
 struct Program {
@@ -137,19 +137,21 @@ macro_rules! expr_value_op {
 
 // IR
 
+type Label = u32;
 type Register = u32;
 
 #[derive(Debug)]
 enum IRInstr {
+    Label(Label),
     IR2(IR2),
     IRJ(IRJ),
+    Ret,
 }
 
 #[derive(Debug, Copy, Clone)]
 enum IROp2 {
     Add,
     Move,
-    Return, // TODO: Return should just yeild one register, but it currently just marks different paths so leaving for now.
     Compare,
 }
 
@@ -175,11 +177,12 @@ enum IRJOp {
 #[derive(Debug)]
 struct IRJ {
     opcode: IRJOp,
-    skip_instrs: u32,
+    label: Label,
 }
 
 #[derive(Debug)]
 struct IRGen {
+    label_counter: u32,
     reg_counter: u32,
     ir: Vec<IRInstr>,
 }
@@ -187,6 +190,7 @@ struct IRGen {
 impl IRGen {
     fn new() -> Self {
         IRGen {
+            label_counter: 0,
             reg_counter: 0,
             ir: vec![],
         }
@@ -195,6 +199,11 @@ impl IRGen {
     fn new_reg(&mut self) -> u32 {
         self.reg_counter += 1;
         self.reg_counter - 1
+    }
+
+    fn new_label(&mut self) -> u32 {
+        self.label_counter += 1;
+        self.label_counter - 1
     }
 
     fn gen_expr(&mut self, expr: &Expr) -> Register {
@@ -246,57 +255,35 @@ impl IRGen {
     fn gen_if_stmt(&mut self, if_stmt: &IfStmt) {
         self.gen_expr(&if_stmt.condition);
 
+        let jump_if_false_label = self.new_label();
         self.ir.push(IRInstr::IRJ(IRJ {
             opcode: IRJOp::JumpNotEq,
-            skip_instrs: 0,
+            label: jump_if_false_label,
         }));
-        let jump_if_false_loc = self.ir.len() - 1;
 
         for stmt in &if_stmt.if_true {
             self.gen_stmt(stmt);
         }
+        let jump_if_true_label = self.new_label();
         self.ir.push(IRInstr::IRJ(IRJ {
             opcode: IRJOp::Jump,
-            skip_instrs: 0,
+            label: jump_if_true_label,
         }));
-        let jump_if_true_loc = self.ir.len() - 1;
-
-        let if_false_skip_count = self.ir.len() - jump_if_false_loc - 1;
-        let jump_if_false = self.ir.get_mut(jump_if_false_loc);
-        match jump_if_false.unwrap() {
-            IRInstr::IRJ(instr) => {
-                instr.skip_instrs = if_false_skip_count as u32;
-            }
-            _ => unreachable!(),
-        }
+        self.ir.push(IRInstr::Label(jump_if_false_label));
 
         if let Some(if_false) = &if_stmt.if_false {
             for stmt in if_false {
                 self.gen_stmt(stmt);
             }
-        }
-
-        let if_true_skip_count = self.ir.len() - jump_if_true_loc - 1;
-        if if_true_skip_count > 0 {
-            let jump_if_true = self.ir.get_mut(jump_if_true_loc);
-            match jump_if_true.unwrap() {
-                IRInstr::IRJ(instr) => {
-                    instr.skip_instrs = if_true_skip_count as u32;
-                }
-                _ => unreachable!(),
-            }
+            self.ir.push(IRInstr::Label(jump_if_true_label));
         }
     }
 
     fn gen_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::ReturnStmt(return_stmt) => {
-                let expr = self.gen_expr(&return_stmt.returning);
-                self.ir.push(IRInstr::IR2(IR2 {
-                    opcode: IROp2::Return,
-                    source: IR2Source::Imm(1),
-                    dest: expr,
-                }));
+                self.gen_expr(&return_stmt.returning);
+                self.ir.push(IRInstr::Ret);
             }
             Stmt::IfStmt(if_stmt) => self.gen_if_stmt(if_stmt),
             _ => unimplemented!(),
@@ -316,11 +303,15 @@ impl IRGen {
 
 struct Compiler {
     instrs: Vec<String>,
+    needs_patching: HashMap<usize, u32>,
 }
 
 impl Compiler {
     fn new() -> Self {
-        Self { instrs: vec![] }
+        Self {
+            instrs: vec![],
+            needs_patching: HashMap::new(),
+        }
     }
 
     fn compile(mut self, ir: &Vec<IRInstr>) -> Self {
@@ -346,7 +337,6 @@ impl Compiler {
                 let op = match instr.opcode {
                     IROp2::Add => "add",
                     IROp2::Move => "mov",
-                    IROp2::Return => "ret",
                     IROp2::Compare => "cmp",
                 };
 
@@ -359,9 +349,16 @@ impl Compiler {
 
                 self.instrs.push(format!("\t{} {}, {}", op, src, dest));
             }
-            IRInstr::IRJ(instr) => {
-                println!("jump unimplemented");
-            }
+            IRInstr::IRJ(instr) => match instr.opcode {
+                IRJOp::Jump => {
+                    self.instrs.push(format!("\tjmp .L_{}", instr.label));
+                }
+                IRJOp::JumpNotEq => {
+                    self.instrs.push(format!("\tjne .L_{}", instr.label));
+                }
+            },
+            IRInstr::Label(label) => self.instrs.push(format!(".L_{}:", label)),
+            IRInstr::Ret => self.instrs.push(format!("\tret")),
         }
     }
 
